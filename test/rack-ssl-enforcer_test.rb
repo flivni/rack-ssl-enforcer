@@ -453,6 +453,28 @@ class TestRackSslEnforcer < Test::Unit::TestCase
     end
   end
 
+  context ':only_hosts & :only & rule_type http' do
+    setup { mock_app :only_hosts => "example.org", :only => '/foo', :rule_type => :http }
+
+    should 'redirect to HTTP for example.org/foo' do
+      get 'https://example.org/foo'
+      assert_equal 301, last_response.status
+      assert_equal 'http://example.org/foo', last_response.location
+    end
+
+    should 'not redirect for HTTPS example.org/bar' do
+      get 'https://example.org/bar'
+      assert_equal 200, last_response.status
+      assert_equal 'Hello world!', last_response.body
+    end
+
+    should 'not redirect for HTTP example.org/bar' do
+      get 'http://example.org/bar'
+      assert_equal 200, last_response.status
+      assert_equal 'Hello world!', last_response.body
+    end
+  end
+
   context ':only_hosts & :except' do
     setup { mock_app :only_hosts => "example.org", :except => '/foo' }
 

@@ -14,6 +14,7 @@ module Rack
     # are encoded and that you understand the consequences (see documentation)
     def initialize(app, options={})
       default_options = {
+        :rule_type            => :ssl,
         :redirect_to          => nil,
         :strict               => false,
         :mixed                => false,
@@ -24,50 +25,71 @@ module Rack
       }
       CONSTRAINTS_BY_TYPE.values.each { |constraint| default_options[constraint] = nil }
 
+
       @app, @options = app, default_options.merge(options)
     end
 
     def call(env)
+      @env = env
       @request = Rack::Request.new(env)
-      @scheme = if enforce_ssl?
-        'https'
-      elsif enforce_non_ssl?
-        'http'
+      return @app.call(env) if short_circuit?
+
+      if matches_rule?
+        short_circuit()
+        case @options[:rule_type]
+          when :ssl then @scheme = 'https'
+          when :http then @scheme = 'http'
+        end
+      elsif @options[:rule_type] == :ssl && enforce_non_ssl?
+        short_circuit()
+        @scheme = 'http'
       end
 
-      if redirect_required?
-        modify_location_and_redirect
-      elsif ssl_request?
-        status, headers, body = @app.call(env)
-        flag_cookies_as_secure!(headers) if @options[:force_secure_cookies]
-        set_hsts_headers!(headers) if @options[:hsts] && !@options[:strict]
-        [status, headers, body]
+      if short_circuit?
+        if redirect_required?
+          modify_location_and_redirect
+        elsif ssl_request?
+          status, headers, body = @app.call(env)
+          flag_cookies_as_secure!(headers) if @options[:force_secure_cookies]
+          set_hsts_headers!(headers) if @options[:hsts] && !@options[:strict]
+          [status, headers, body]
+        else
+          @app.call(env)
+        end
       else
         @app.call(env)
       end
     end
 
   private
-  
+
+    def short_circuit?
+      @env["rack.ssl-enforcer.short-circuit"] == true
+    end
+
+    def short_circuit
+      @env["rack.ssl-enforcer.short-circuit"] = true
+    end
+
     def redirect_required?
       scheme_mismatch? or host_mismatch?
     end
-    
+
     def scheme_mismatch?
       @scheme && @scheme != current_scheme
     end
-    
+
     def host_mismatch?
       destination_host && destination_host != @request.host
     end
-    
+
     def modify_location_and_redirect
       location = "#{current_scheme}://#{@request.host}#{@request.fullpath}"
       location = replace_scheme(location, @scheme)
       location = replace_host(location, @options[:redirect_to])
       redirect_to(location)
     end
-    
+
     def redirect_to(location)
       body = "<html><body>You are being <a href=\"#{location}\">redirected</a>.</body></html>"
       [301, { 'Content-Type' => 'text/html', 'Location' => location }, [body]]
@@ -76,7 +98,7 @@ module Rack
     def ssl_request?
       current_scheme == 'https'
     end
-    
+
     def destination_host
       if @options[:redirect_to]
         host_parts = URI.split(@options[:redirect_to])
@@ -95,7 +117,7 @@ module Rack
       end
     end
 
-    def enforce_ssl_for?(keys)
+    def matches_rule_for?(keys)
       provided_keys = keys.select { |key| @options[key] }
       if provided_keys.empty?
         true
@@ -113,9 +135,9 @@ module Rack
       @options[:strict] || @options[:mixed] && !(@request.request_method == 'PUT' || @request.request_method == 'POST')
     end
 
-    def enforce_ssl?
+    def matches_rule?
       CONSTRAINTS_BY_TYPE.inject(true) do |memo, (type, keys)|
-        memo && enforce_ssl_for?(keys)
+        memo && matches_rule_for?(keys)
       end
     end
 
@@ -160,7 +182,6 @@ module Rack
         end.join("\n")
       end
     end
-
     # see http://en.wikipedia.org/wiki/Strict_Transport_Security
     def set_hsts_headers!(headers)
       opts = { :expires => 31536000, :subdomains => true }
